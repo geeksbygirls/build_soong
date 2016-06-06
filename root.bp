@@ -12,6 +12,7 @@ optional_subdirs = [
     "art",
     "bionic",
     "build/kati",
+    "build/libs/*",
     "build/tools/*",
     "dalvik",
     "development/ndk",
