@@ -29,7 +29,8 @@ var (
 	armCflags = []string{
 		"-fno-exceptions", // from build/core/combo/select.mk
 		"-Wno-multichar",  // from build/core/combo/select.mk
-		"-msoft-float",
+		"-mhard-float",
+		"-mfloat-abi=softfp",
 		"-ffunction-sections",
 		"-fdata-sections",
 		"-funwind-tables",
