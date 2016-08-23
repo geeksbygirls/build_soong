@@ -48,7 +48,6 @@ var (
 		// TARGET_RELEASE_CFLAGS from build/core/combo/select.mk
 		"-O2",
 		"-g",
-		"-fno-strict-aliasing",
 	}
 
 	x86_64Cppflags = []string{}

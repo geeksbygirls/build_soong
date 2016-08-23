@@ -81,7 +81,6 @@ var (
 		"-mthumb",
 		"-Os",
 		"-fomit-frame-pointer",
-		"-fno-strict-aliasing",
 	}
 
 	armArchVariantCflags = map[string][]string{

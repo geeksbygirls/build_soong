@@ -24,7 +24,6 @@ var (
 	arm64Cflags = []string{
 		"-fno-exceptions", // from build/core/combo/select.mk
 		"-Wno-multichar",  // from build/core/combo/select.mk
-		"-fno-strict-aliasing",
 		"-fstack-protector-strong",
 		"-ffunction-sections",
 		"-fdata-sections",
