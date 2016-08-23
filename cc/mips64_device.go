@@ -26,7 +26,6 @@ var (
 		"-Wno-multichar",  // from build/core/combo/select.mk
 		"-O2",
 		"-fomit-frame-pointer",
-		"-fno-strict-aliasing",
 		"-funswitch-loops",
 		"-U__unix",
 		"-U__unix__",
