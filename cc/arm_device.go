@@ -47,11 +47,27 @@ var (
 
 		// TARGET_RELEASE_CFLAGS
 		"-DNDEBUG",
-		"-g",
+		"-g0",
 		"-Wstrict-aliasing=2",
 		"-fgcse-after-reload",
 		"-frerun-cse-after-loop",
 		"-frename-registers",
+
+		// Benzo Lite
+		"-fgcse-las",
+		"-fgcse-sm",
+		"-fivopts",
+		"-fomit-frame-pointer",
+		"-fsection-anchors",
+		"-ftree-loop-im",
+		"-ftree-loop-ivcanon",
+		"-fweb",
+		"-fira-hoist-pressure",
+		"-fira-loop-pressure",
+		"-fipa-sra",
+		"-fipa-pta",
+		"-fipa-cp",
+		"-fipa-cp-clone",
 	}
 
 	armCppflags = []string{
