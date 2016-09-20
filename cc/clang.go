@@ -67,6 +67,12 @@ func init() {
 	pctx.StaticVariable("clangExtraCflags", strings.Join([]string{
 		"-D__compiler_offsetof=__builtin_offsetof",
 
+		// Few flags for clang
+		"-fipa-sra",
+		"-fipa-pta",
+		"-fipa-cp",
+		"-fipa-cp-clone",
+
 		// Help catch common 32/64-bit errors.
 		"-Werror=int-conversion",
 
