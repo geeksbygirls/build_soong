@@ -19,9 +19,9 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/google/blueprint"
-
 	"android/soong/android"
+
+	"github.com/google/blueprint"
 )
 
 type TestProperties struct {
@@ -38,6 +38,14 @@ type TestBinaryProperties struct {
 	// relative_install_path. Useful if several tests need to be in the same
 	// directory, but test_per_src doesn't work.
 	No_named_install_directory *bool
+
+	// list of files or filegroup modules that provide data that should be installed alongside
+	// the test
+	Data []string
+
+	// list of compatibility suites (for example "cts", "vts") that the module should be
+	// installed into.
+	Test_suites []string
 }
 
 func init() {
@@ -191,6 +199,7 @@ type testBinary struct {
 	*binaryDecorator
 	*baseCompiler
 	Properties TestBinaryProperties
+	data       android.Paths
 }
 
 func (test *testBinary) linkerProps() []interface{} {
@@ -205,6 +214,8 @@ func (test *testBinary) linkerInit(ctx BaseModuleContext) {
 }
 
 func (test *testBinary) linkerDeps(ctx DepsContext, deps Deps) Deps {
+	android.ExtractSourcesDeps(ctx, test.Properties.Data)
+
 	deps = test.testDecorator.linkerDeps(ctx, deps)
 	deps = test.binaryDecorator.linkerDeps(ctx, deps)
 	return deps
@@ -217,6 +228,8 @@ func (test *testBinary) linkerFlags(ctx ModuleContext, flags Flags) Flags {
 }
 
 func (test *testBinary) install(ctx ModuleContext, file android.Path) {
+	test.data = ctx.ExpandSources(test.Properties.Data, nil)
+
 	test.binaryDecorator.baseInstaller.dir = "nativetest"
 	test.binaryDecorator.baseInstaller.dir64 = "nativetest64"
 

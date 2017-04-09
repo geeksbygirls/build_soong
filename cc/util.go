@@ -88,6 +88,7 @@ func moduleToLibName(module string) (string, error) {
 func flagsToBuilderFlags(in Flags) builderFlags {
 	return builderFlags{
 		globalFlags: strings.Join(in.GlobalFlags, " "),
+		arFlags:     strings.Join(in.ArFlags, " "),
 		asFlags:     strings.Join(in.AsFlags, " "),
 		cFlags:      strings.Join(in.CFlags, " "),
 		conlyFlags:  strings.Join(in.ConlyFlags, " "),
@@ -101,7 +102,10 @@ func flagsToBuilderFlags(in Flags) builderFlags {
 		yasmFlags:   strings.Join(in.YasmFlags, " "),
 		toolchain:   in.Toolchain,
 		clang:       in.Clang,
+		coverage:    in.Coverage,
 		tidy:        in.Tidy,
+
+		systemIncludeFlags: strings.Join(in.SystemIncludeFlags, " "),
 
 		groupStaticLibs: in.GroupStaticLibs,
 	}

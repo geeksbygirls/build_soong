@@ -46,6 +46,8 @@ func init() {
 
 		ctx.TopDown("tsan_deps", sanitizerDepsMutator(tsan))
 		ctx.BottomUp("tsan", sanitizerMutator(tsan)).Parallel()
+
+		ctx.BottomUp("coverage", coverageLinkingMutator).Parallel()
 	})
 
 	pctx.Import("android/soong/cc/config")
@@ -78,6 +80,7 @@ type PathDeps struct {
 
 	// Paths to .o files
 	Objs               Objects
+	StaticLibObjs      Objects
 	WholeStaticLibObjs Objects
 
 	// Paths to generated source files
@@ -93,6 +96,7 @@ type PathDeps struct {
 
 type Flags struct {
 	GlobalFlags []string // Flags that apply to C, C++, and assembly source files
+	ArFlags     []string // Flags that apply to ar
 	AsFlags     []string // Flags that apply to assembly source files
 	CFlags      []string // Flags that apply to C and C++ source files
 	ConlyFlags  []string // Flags that apply to C source files
@@ -105,9 +109,14 @@ type Flags struct {
 	TidyFlags   []string // Flags that apply to clang-tidy
 	YasmFlags   []string // Flags that apply to yasm assembly source files
 
+	// Global include flags that apply to C, C++, and assembly source files
+	// These must be after any module include flags, which will be in GlobalFlags.
+	SystemIncludeFlags []string
+
 	Toolchain config.Toolchain
 	Clang     bool
 	Tidy      bool
+	Coverage  bool
 
 	RequiredInstructionSet string
 	DynamicLinker          string
@@ -130,9 +139,6 @@ type BaseProperties struct {
 	// Minimum sdk version supported when compiling against the ndk
 	Sdk_version string
 
-	// Whether to compile against the VNDK
-	Use_vndk bool
-
 	// don't insert default compiler flags into asflags, cflags,
 	// cppflags, conlyflags, ldflags, or include_dirs
 	No_default_compiler_flags *bool
@@ -140,12 +146,10 @@ type BaseProperties struct {
 	AndroidMkSharedLibs []string `blueprint:"mutated"`
 	HideFromMake        bool     `blueprint:"mutated"`
 	PreventInstall      bool     `blueprint:"mutated"`
-	Vndk_version        string   `blueprint:"mutated"`
 }
 
 type UnusedProperties struct {
-	Native_coverage *bool
-	Tags            []string
+	Tags []string
 }
 
 type ModuleContextIntf interface {
@@ -208,6 +212,7 @@ type installer interface {
 	installerProps() []interface{}
 	install(ctx ModuleContext, path android.Path)
 	inData() bool
+	inSanitizerDir() bool
 	hostToolPath() android.OptionalPath
 }
 
@@ -261,6 +266,7 @@ type Module struct {
 	installer installer
 	stl       *stl
 	sanitize  *sanitize
+	coverage  *coverage
 
 	androidMkSharedLibDeps []string
 
@@ -269,6 +275,9 @@ type Module struct {
 	cachedToolchain config.Toolchain
 
 	subAndroidMkOnce map[subAndroidMkProvider]bool
+
+	// Flags used to compile this module
+	flags Flags
 }
 
 func (c *Module) Init() (blueprint.Module, []interface{}) {
@@ -287,6 +296,9 @@ func (c *Module) Init() (blueprint.Module, []interface{}) {
 	}
 	if c.sanitize != nil {
 		props = append(props, c.sanitize.props()...)
+	}
+	if c.coverage != nil {
+		props = append(props, c.coverage.props()...)
 	}
 	for _, feature := range c.features {
 		props = append(props, feature.props()...)
@@ -367,8 +379,8 @@ func (ctx *moduleContextImpl) sdk() bool {
 
 func (ctx *moduleContextImpl) sdkVersion() string {
 	if ctx.ctx.Device() {
-		if ctx.mod.Properties.Use_vndk {
-			return ctx.mod.Properties.Vndk_version
+		if ctx.vndk() {
+			return "current"
 		} else {
 			return ctx.mod.Properties.Sdk_version
 		}
@@ -377,10 +389,7 @@ func (ctx *moduleContextImpl) sdkVersion() string {
 }
 
 func (ctx *moduleContextImpl) vndk() bool {
-	if ctx.ctx.Device() {
-		return ctx.mod.Properties.Use_vndk
-	}
-	return false
+	return ctx.ctx.Os() == android.Android && ctx.ctx.Vendor() && ctx.ctx.DeviceConfig().CompileVndk()
 }
 
 func (ctx *moduleContextImpl) selectedStl() string {
@@ -408,6 +417,7 @@ func newModule(hod android.HostOrDeviceSupported, multilib android.Multilib) *Mo
 	}
 	module.stl = &stl{}
 	module.sanitize = &sanitize{}
+	module.coverage = &coverage{}
 	return module
 }
 
@@ -451,6 +461,9 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 	if c.sanitize != nil {
 		flags = c.sanitize.flags(ctx, flags)
 	}
+	if c.coverage != nil {
+		flags = c.coverage.flags(ctx, flags)
+	}
 	for _, feature := range c.features {
 		flags = feature.flags(ctx, flags)
 	}
@@ -462,6 +475,13 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 	flags.CppFlags, _ = filterList(flags.CppFlags, config.IllegalFlags)
 	flags.ConlyFlags, _ = filterList(flags.ConlyFlags, config.IllegalFlags)
 
+	deps := c.depsToPaths(ctx)
+	if ctx.Failed() {
+		return
+	}
+	flags.GlobalFlags = append(flags.GlobalFlags, deps.Flags...)
+	c.flags = flags
+
 	// Optimization to reduce size of build.ninja
 	// Replace the long list of flags for each file with a module-local variable
 	ctx.Variable(pctx, "cflags", strings.Join(flags.CFlags, " "))
@@ -470,13 +490,6 @@ func (c *Module) GenerateAndroidBuildActions(actx android.ModuleContext) {
 	flags.CFlags = []string{"$cflags"}
 	flags.CppFlags = []string{"$cppflags"}
 	flags.AsFlags = []string{"$asflags"}
-
-	deps := c.depsToPaths(ctx)
-	if ctx.Failed() {
-		return
-	}
-
-	flags.GlobalFlags = append(flags.GlobalFlags, deps.Flags...)
 
 	var objs Objects
 	if c.compiler != nil {
@@ -522,26 +535,18 @@ func (c *Module) begin(ctx BaseModuleContext) {
 	if c.sanitize != nil {
 		c.sanitize.begin(ctx)
 	}
+	if c.coverage != nil {
+		c.coverage.begin(ctx)
+	}
 	for _, feature := range c.features {
 		feature.begin(ctx)
 	}
 	if ctx.sdk() {
-		if ctx.vndk() {
-			ctx.PropertyErrorf("use_vndk",
-				"sdk_version and use_vndk cannot be used at the same time")
-		}
-
 		version, err := normalizeNdkApiLevel(ctx.sdkVersion(), ctx.Arch())
 		if err != nil {
 			ctx.PropertyErrorf("sdk_version", err.Error())
 		}
 		c.Properties.Sdk_version = version
-	} else if ctx.vndk() {
-		version, err := normalizeNdkApiLevel(ctx.DeviceConfig().VndkVersion(), ctx.Arch())
-		if err != nil {
-			ctx.ModuleErrorf("Bad BOARD_VNDK_VERSION: %s", err.Error())
-		}
-		c.Properties.Vndk_version = version
 	}
 }
 
@@ -559,6 +564,9 @@ func (c *Module) deps(ctx DepsContext) Deps {
 	}
 	if c.sanitize != nil {
 		deps = c.sanitize.deps(ctx, deps)
+	}
+	if c.coverage != nil {
+		deps = c.coverage.deps(ctx, deps)
 	}
 	for _, feature := range c.features {
 		deps = feature.deps(ctx, deps)
@@ -630,7 +638,7 @@ func (c *Module) DepsMutator(actx android.BottomUpMutatorContext) {
 
 	variantNdkLibs := []string{}
 	variantLateNdkLibs := []string{}
-	if ctx.sdk() || ctx.vndk() {
+	if ctx.Os() == android.Android {
 		version := ctx.sdkVersion()
 
 		// Rewrites the names of shared libraries into the names of the NDK
@@ -647,14 +655,16 @@ func (c *Module) DepsMutator(actx android.BottomUpMutatorContext) {
 			variantLibs := []string{}
 			nonvariantLibs := []string{}
 			for _, entry := range list {
-				if inList(entry, ndkPrebuiltSharedLibraries) {
+				if ctx.sdk() && inList(entry, ndkPrebuiltSharedLibraries) {
 					if !inList(entry, ndkMigratedLibs) {
 						nonvariantLibs = append(nonvariantLibs, entry+".ndk."+version)
 					} else {
 						variantLibs = append(variantLibs, entry+ndkLibrarySuffix)
 					}
+				} else if ctx.vndk() && inList(entry, config.LLndkLibraries()) {
+					nonvariantLibs = append(nonvariantLibs, entry+llndkLibrarySuffix)
 				} else {
-					nonvariantLibs = append(variantLibs, entry)
+					nonvariantLibs = append(nonvariantLibs, entry)
 				}
 			}
 			return nonvariantLibs, variantLibs
@@ -948,6 +958,20 @@ func (c *Module) depsToPaths(ctx android.ModuleContext) PathDeps {
 			depPaths.CrtEnd = linkFile
 		}
 
+		switch tag {
+		case staticDepTag, staticExportDepTag, lateStaticDepTag:
+			staticLib, ok := cc.linker.(libraryInterface)
+			if !ok || !staticLib.static() {
+				ctx.ModuleErrorf("module %q not a static library", name)
+				return
+			}
+
+			// When combining coverage files for shared libraries and executables, coverage files
+			// in static libraries act as if they were whole static libraries.
+			depPaths.StaticLibObjs.coverageFiles = append(depPaths.StaticLibObjs.coverageFiles,
+				staticLib.objs().coverageFiles...)
+		}
+
 		if ptr != nil {
 			if !linkFile.Valid() {
 				ctx.ModuleErrorf("module %q missing output file", name)
@@ -972,10 +996,17 @@ func (c *Module) InstallInData() bool {
 	if c.installer == nil {
 		return false
 	}
-	if c.sanitize != nil && c.sanitize.inData() {
+	return c.installer.inData()
+}
+
+func (c *Module) InstallInSanitizerDir() bool {
+	if c.installer == nil {
+		return false
+	}
+	if c.sanitize != nil && c.sanitize.inSanitizerDir() {
 		return true
 	}
-	return c.installer.inData()
+	return c.installer.inSanitizerDir()
 }
 
 func (c *Module) HostToolPath() android.OptionalPath {
@@ -1021,6 +1052,7 @@ func DefaultsFactory(props ...interface{}) (blueprint.Module, []interface{}) {
 		&StripProperties{},
 		&InstallerProperties{},
 		&TidyProperties{},
+		&CoverageProperties{},
 	)
 
 	return android.InitDefaultsModule(module, module, props...)

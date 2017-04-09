@@ -28,6 +28,13 @@ const (
 	asanCflags  = "-fno-omit-frame-pointer"
 	asanLdflags = "-Wl,-u,__asan_preinit"
 	asanLibs    = "libasan"
+
+	cfiCflags = "-flto -fsanitize-cfi-cross-dso -fvisibility=default " +
+		"-fsanitize-blacklist=external/compiler-rt/lib/cfi/cfi_blacklist.txt"
+	// FIXME: revert the __cfi_check flag when clang is updated to r280031.
+	cfiLdflags = "-flto -fsanitize-cfi-cross-dso -fsanitize=cfi " +
+		"-Wl,-plugin-opt,O1 -Wl,-export-dynamic-symbol=__cfi_check"
+	cfiArflags = "--plugin ${config.ClangBin}/../lib64/LLVMgold.so"
 )
 
 type sanitizerType int
@@ -90,7 +97,7 @@ type SanitizeProperties struct {
 
 	SanitizerEnabled bool `blueprint:"mutated"`
 	SanitizeDep      bool `blueprint:"mutated"`
-	InData           bool `blueprint:"mutated"`
+	InSanitizerDir   bool `blueprint:"mutated"`
 }
 
 type sanitize struct {
@@ -136,8 +143,14 @@ func (sanitize *sanitize) begin(ctx BaseModuleContext) {
 			s.Undefined = boolPtr(true)
 		}
 
-		if found, globalSanitizers = removeFromList("address", globalSanitizers); found && s.Address == nil {
-			s.Address = boolPtr(true)
+		if found, globalSanitizers = removeFromList("address", globalSanitizers); found {
+			if s.Address == nil {
+				s.Address = boolPtr(true)
+			} else if *s.Address == false {
+				// Coverage w/o address is an error. If globalSanitizers includes both, and the module
+				// disables address, then disable coverage as well.
+				_, globalSanitizers = removeFromList("coverage", globalSanitizers)
+			}
 		}
 
 		if found, globalSanitizers = removeFromList("thread", globalSanitizers); found && s.Thread == nil {
@@ -159,6 +172,18 @@ func (sanitize *sanitize) begin(ctx BaseModuleContext) {
 		if len(globalSanitizers) > 0 {
 			ctx.ModuleErrorf("unknown global sanitizer option %s", globalSanitizers[0])
 		}
+	}
+
+	// CFI needs gold linker, and mips toolchain does not have one.
+	if !ctx.AConfig().EnableCFI() || ctx.Arch().ArchType == android.Mips || ctx.Arch().ArchType == android.Mips64 {
+		s.Cfi = nil
+		s.Diag.Cfi = nil
+	}
+
+	// Also disable CFI for arm32 until b/35157333 is fixed.
+	if ctx.Arch().ArchType == android.Arm {
+		s.Cfi = nil
+		s.Diag.Cfi = nil
 	}
 
 	if ctx.staticBinary() {
@@ -269,11 +294,6 @@ func (sanitize *sanitize) flags(ctx ModuleContext, flags Flags) Flags {
 		flags.CFlags = append(flags.CFlags, asanCflags)
 		flags.LdFlags = append(flags.LdFlags, asanLdflags)
 
-		// ASan runtime library must be the first in the link order.
-		runtimeLibrary := config.AddressSanitizerRuntimeLibrary(ctx.toolchain())
-		if runtimeLibrary != "" {
-			flags.libFlags = append([]string{"${config.ClangAsanLibDir}/" + runtimeLibrary}, flags.libFlags...)
-		}
 		if ctx.Host() {
 			// -nodefaultlibs (provided with libc++) prevents the driver from linking
 			// libraries needed with -fsanitize=address. http://b/18650275 (WAI)
@@ -302,13 +322,18 @@ func (sanitize *sanitize) flags(ctx ModuleContext, flags Flags) Flags {
 	}
 
 	if Bool(sanitize.Properties.Sanitize.Cfi) {
+		if ctx.Arch().ArchType == android.Arm {
+			// __cfi_check needs to be built as Thumb (see the code in linker_cfi.cpp). LLVM is not set up
+			// to do this on a function basis, so force Thumb on the entire module.
+			flags.RequiredInstructionSet = "thumb"
+			// Workaround for b/33678192. CFI jumptables need Thumb2 codegen.  Revert when
+			// Clang is updated past r290384.
+			flags.LdFlags = append(flags.LdFlags, "-march=armv7-a")
+		}
 		sanitizers = append(sanitizers, "cfi")
-		cfiFlags := []string{"-flto", "-fsanitize=cfi", "-fsanitize-cfi-cross-dso"}
-		flags.CFlags = append(flags.CFlags, cfiFlags...)
-		flags.CFlags = append(flags.CFlags, "-fvisibility=default")
-		flags.LdFlags = append(flags.LdFlags, cfiFlags...)
-		// FIXME: revert the __cfi_check flag when clang is updated to r280031.
-		flags.LdFlags = append(flags.LdFlags, "-Wl,-plugin-opt,O1", "-Wl,-export-dynamic-symbol=__cfi_check")
+		flags.CFlags = append(flags.CFlags, cfiCflags)
+		flags.LdFlags = append(flags.LdFlags, cfiLdflags)
+		flags.ArFlags = append(flags.ArFlags, cfiArflags)
 		if Bool(sanitize.Properties.Sanitize.Diag.Cfi) {
 			diagSanitizers = append(diagSanitizers, "cfi")
 		}
@@ -358,8 +383,8 @@ func (sanitize *sanitize) flags(ctx ModuleContext, flags Flags) Flags {
 	return flags
 }
 
-func (sanitize *sanitize) inData() bool {
-	return sanitize.Properties.InData
+func (sanitize *sanitize) inSanitizerDir() bool {
+	return sanitize.Properties.InSanitizerDir
 }
 
 func (sanitize *sanitize) Sanitizer(t sanitizerType) bool {
@@ -422,7 +447,7 @@ func sanitizerMutator(t sanitizerType) func(android.BottomUpMutatorContext) {
 				modules[0].(*Module).sanitize.Properties.SanitizeDep = false
 				modules[1].(*Module).sanitize.Properties.SanitizeDep = false
 				if mctx.Device() {
-					modules[1].(*Module).sanitize.Properties.InData = true
+					modules[1].(*Module).sanitize.Properties.InSanitizerDir = true
 				} else {
 					modules[0].(*Module).Properties.PreventInstall = true
 				}

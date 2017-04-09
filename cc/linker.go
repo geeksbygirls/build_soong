@@ -156,6 +156,10 @@ func (linker *baseLinker) linkerDeps(ctx BaseModuleContext, deps Deps) Deps {
 		}
 	}
 
+	if ctx.Windows() {
+		deps.LateStaticLibs = append(deps.LateStaticLibs, "libwinpthread")
+	}
+
 	return deps
 }
 

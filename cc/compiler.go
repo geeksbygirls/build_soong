@@ -86,6 +86,16 @@ type BaseCompilerProperties struct {
 	// pass -frtti instead of -fno-rtti
 	Rtti *bool
 
+	// C standard version to use. Can be a specific version (such as "gnu11"),
+	// "experimental" (which will use draft versions like C1x when available),
+	// or the empty string (which will use the default).
+	C_std string
+
+	// C++ standard version to use. Can be a specific version (such as
+	// "gnu++11"), "experimental" (which will use draft versions like C++1z when
+	// available), or the empty string (which will use the default).
+	Cpp_std string
+
 	// if set to false, use -std=c++* instead of -std=gnu++*
 	Gnu_extensions *bool
 
@@ -113,9 +123,19 @@ type baseCompiler struct {
 	Properties BaseCompilerProperties
 	Proto      ProtoProperties
 	deps       android.Paths
+	srcs       android.Paths
+	flags      builderFlags
 }
 
 var _ compiler = (*baseCompiler)(nil)
+
+type CompiledInterface interface {
+	Srcs() android.Paths
+}
+
+func (compiler *baseCompiler) Srcs() android.Paths {
+	return compiler.srcs
+}
 
 func (compiler *baseCompiler) appendCflags(flags []string) {
 	compiler.Properties.Cflags = append(compiler.Properties.Cflags, flags...)
@@ -174,23 +194,23 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags) Flag
 	}
 
 	if !ctx.noDefaultCompilerFlags() {
+		flags.GlobalFlags = append(flags.GlobalFlags, "-I"+android.PathForModuleSrc(ctx).String())
+
 		if !(ctx.sdk() || ctx.vndk()) || ctx.Host() {
-			flags.GlobalFlags = append(flags.GlobalFlags,
+			flags.SystemIncludeFlags = append(flags.SystemIncludeFlags,
 				"${config.CommonGlobalIncludes}",
 				"${config.CommonGlobalSystemIncludes}",
 				tc.IncludeFlags(),
 				"${config.CommonNativehelperInclude}")
 		}
-
-		flags.GlobalFlags = append(flags.GlobalFlags, "-I"+android.PathForModuleSrc(ctx).String())
 	}
 
-	if ctx.sdk() || ctx.vndk() {
+	if ctx.sdk() {
 		// The NDK headers are installed to a common sysroot. While a more
 		// typical Soong approach would be to only make the headers for the
 		// library you're using available, we're trying to emulate the NDK
 		// behavior here, and the NDK always has all the NDK headers available.
-		flags.GlobalFlags = append(flags.GlobalFlags,
+		flags.SystemIncludeFlags = append(flags.SystemIncludeFlags,
 			"-isystem "+getCurrentIncludePath(ctx).String(),
 			"-isystem "+getCurrentIncludePath(ctx).Join(ctx, tc.ClangTriple()).String())
 
@@ -210,7 +230,12 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags) Flag
 		legacyIncludes := fmt.Sprintf(
 			"prebuilts/ndk/current/platforms/android-%s/arch-%s/usr/include",
 			ctx.sdkVersion(), ctx.Arch().ArchType.String())
-		flags.GlobalFlags = append(flags.GlobalFlags, "-isystem "+legacyIncludes)
+		flags.SystemIncludeFlags = append(flags.SystemIncludeFlags, "-isystem "+legacyIncludes)
+	}
+
+	if ctx.vndk() {
+		flags.GlobalFlags = append(flags.GlobalFlags,
+			"-D__ANDROID_API__=__ANDROID_API_FUTURE__", "-D__ANDROID_VNDK__")
 	}
 
 	instructionSet := compiler.Properties.Instruction_set
@@ -242,10 +267,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags) Flag
 		flags.LdFlags = config.ClangFilterUnknownCflags(flags.LdFlags)
 
 		target := "-target " + tc.ClangTriple()
-		var gccPrefix string
-		if !ctx.Darwin() {
-			gccPrefix = "-B" + filepath.Join(tc.GccRoot(), tc.GccTriple(), "bin")
-		}
+		gccPrefix := "-B" + config.ToolPath(tc)
 
 		flags.CFlags = append(flags.CFlags, target, gccPrefix)
 		flags.AsFlags = append(flags.AsFlags, target, gccPrefix)
@@ -307,7 +329,18 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags) Flag
 
 	if !ctx.sdk() {
 		cStd := config.CStdVersion
+		if compiler.Properties.C_std == "experimental" {
+			cStd = config.ExperimentalCStdVersion
+		} else if compiler.Properties.C_std != "" {
+			cStd = compiler.Properties.C_std
+		}
+
 		cppStd := config.CppStdVersion
+		if compiler.Properties.Cpp_std == "experimental" {
+			cppStd = config.ExperimentalCppStdVersion
+		} else if compiler.Properties.Cpp_std != "" {
+			cppStd = compiler.Properties.Cpp_std
+		}
 
 		if !flags.Clang {
 			// GCC uses an invalid C++14 ABI (emits calls to
@@ -384,7 +417,7 @@ func (compiler *baseCompiler) hasSrcExt(ext string) bool {
 var gnuToCReplacer = strings.NewReplacer("gnu", "c")
 
 func ndkPathDeps(ctx ModuleContext) android.Paths {
-	if ctx.sdk() || ctx.vndk() {
+	if ctx.sdk() {
 		// The NDK sysroot timestamp file depends on all the NDK sysroot files
 		// (headers and libraries).
 		return android.Paths{getNdkSysrootTimestampFile(ctx)}
@@ -407,6 +440,9 @@ func (compiler *baseCompiler) compile(ctx ModuleContext, flags Flags, deps PathD
 	pathDeps = append(pathDeps, flags.CFlagsDeps...)
 
 	compiler.deps = pathDeps
+
+	// Save src, buildFlags and context
+	compiler.srcs = srcs
 
 	// Compile files listed in c.Properties.Srcs into objects
 	objs := compileObjs(ctx, buildFlags, "", srcs, compiler.deps)

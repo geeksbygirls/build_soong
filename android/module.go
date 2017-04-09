@@ -57,8 +57,10 @@ type androidBaseContext interface {
 	Host() bool
 	Device() bool
 	Darwin() bool
+	Windows() bool
 	Debug() bool
 	PrimaryArch() bool
+	Vendor() bool
 	AConfig() Config
 	DeviceConfig() DeviceConfig
 }
@@ -77,6 +79,7 @@ type ModuleContext interface {
 	ModuleBuild(pctx blueprint.PackageContext, params ModuleBuildParams)
 
 	ExpandSources(srcFiles, excludes []string) Paths
+	ExpandSourcesSubDir(srcFiles, excludes []string, subDir string) Paths
 	Glob(globPattern string, excludes []string) Paths
 
 	InstallFile(installPath OutputPath, srcPath Path, deps ...Path) OutputPath
@@ -86,8 +89,10 @@ type ModuleContext interface {
 
 	AddMissingDependencies(deps []string)
 
-	Proprietary() bool
 	InstallInData() bool
+	InstallInSanitizerDir() bool
+
+	RequiredModuleNames() []string
 }
 
 type Module interface {
@@ -100,6 +105,7 @@ type Module interface {
 	Enabled() bool
 	Target() Target
 	InstallInData() bool
+	InstallInSanitizerDir() bool
 	SkipInstall()
 }
 
@@ -133,6 +139,12 @@ type commonProperties struct {
 
 	// whether this is a proprietary vendor module, and should be installed into /vendor
 	Proprietary bool
+
+	// vendor who owns this module
+	Owner string
+
+	// whether this module is device specific and should be installed into /vendor
+	Vendor bool
 
 	// *.logtags files, to combine together in order to generate the /system/etc/event-log-tags
 	// file
@@ -218,17 +230,17 @@ func InitAndroidArchModule(m Module, hod HostOrDeviceSupported, defaultMultilib 
 	return InitArchModule(m, propertyStructs...)
 }
 
-// A AndroidModuleBase object contains the properties that are common to all Android
+// A ModuleBase object contains the properties that are common to all Android
 // modules.  It should be included as an anonymous field in every module
 // struct definition.  InitAndroidModule should then be called from the module's
 // factory function, and the return values from InitAndroidModule should be
 // returned from the factory function.
 //
-// The AndroidModuleBase type is responsible for implementing the
-// GenerateBuildActions method to support the blueprint.Module interface. This
-// method will then call the module's GenerateAndroidBuildActions method once
-// for each build variant that is to be built. GenerateAndroidBuildActions is
-// passed a AndroidModuleContext rather than the usual blueprint.ModuleContext.
+// The ModuleBase type is responsible for implementing the GenerateBuildActions
+// method to support the blueprint.Module interface. This method will then call
+// the module's GenerateAndroidBuildActions method once for each build variant
+// that is to be built. GenerateAndroidBuildActions is passed a
+// AndroidModuleContext rather than the usual blueprint.ModuleContext.
 // AndroidModuleContext exposes extra functionality specific to the Android build
 // system including details about the particular build variant that is to be
 // generated.
@@ -236,12 +248,12 @@ func InitAndroidArchModule(m Module, hod HostOrDeviceSupported, defaultMultilib 
 // For example:
 //
 //     import (
-//         "android/soong/common"
+//         "android/soong/android"
 //         "github.com/google/blueprint"
 //     )
 //
 //     type myModule struct {
-//         common.AndroidModuleBase
+//         android.ModuleBase
 //         properties struct {
 //             MyProperty string
 //         }
@@ -249,10 +261,10 @@ func InitAndroidArchModule(m Module, hod HostOrDeviceSupported, defaultMultilib 
 //
 //     func NewMyModule() (blueprint.Module, []interface{}) {
 //         m := &myModule{}
-//         return common.InitAndroidModule(m, &m.properties)
+//         return android.InitAndroidModule(m, &m.properties)
 //     }
 //
-//     func (m *myModule) GenerateAndroidBuildActions(ctx common.AndroidModuleContext) {
+//     func (m *myModule) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 //         // Get the CPU architecture for the current build variant.
 //         variantArch := ctx.Arch()
 //
@@ -393,6 +405,10 @@ func (p *ModuleBase) InstallInData() bool {
 	return false
 }
 
+func (p *ModuleBase) InstallInSanitizerDir() bool {
+	return false
+}
+
 func (a *ModuleBase) generateModuleTarget(ctx blueprint.ModuleContext) {
 	allInstalledFiles := Paths{}
 	allCheckbuildFiles := Paths{}
@@ -449,6 +465,7 @@ func (a *ModuleBase) androidBaseContextFactory(ctx blueprint.BaseModuleContext) 
 	return androidBaseContextImpl{
 		target:        a.commonProperties.CompileTarget,
 		targetPrimary: a.commonProperties.CompilePrimary,
+		vendor:        a.commonProperties.Proprietary || a.commonProperties.Vendor,
 		config:        ctx.Config().(Config),
 	}
 }
@@ -485,6 +502,7 @@ type androidBaseContextImpl struct {
 	target        Target
 	targetPrimary bool
 	debug         bool
+	vendor        bool
 	config        Config
 }
 
@@ -597,6 +615,10 @@ func (a *androidBaseContextImpl) Darwin() bool {
 	return a.target.Os == Darwin
 }
 
+func (a *androidBaseContextImpl) Windows() bool {
+	return a.target.Os == Windows
+}
+
 func (a *androidBaseContextImpl) Debug() bool {
 	return a.debug
 }
@@ -613,12 +635,16 @@ func (a *androidBaseContextImpl) DeviceConfig() DeviceConfig {
 	return DeviceConfig{a.config.deviceConfig}
 }
 
-func (a *androidModuleContext) Proprietary() bool {
-	return a.module.base().commonProperties.Proprietary
+func (a *androidBaseContextImpl) Vendor() bool {
+	return a.vendor
 }
 
 func (a *androidModuleContext) InstallInData() bool {
 	return a.module.InstallInData()
+}
+
+func (a *androidModuleContext) InstallInSanitizerDir() bool {
+	return a.module.InstallInSanitizerDir()
 }
 
 func (a *androidModuleContext) InstallFileName(installPath OutputPath, name string, srcPath Path,
@@ -628,7 +654,7 @@ func (a *androidModuleContext) InstallFileName(installPath OutputPath, name stri
 	a.module.base().hooks.runInstallHooks(a, fullInstallPath, false)
 
 	if !a.module.base().commonProperties.SkipInstall &&
-		(a.Host() || !a.AConfig().SkipDeviceInstall()) {
+		(!a.Device() || !a.AConfig().SkipDeviceInstall()) {
 
 		deps = append(deps, a.installDeps...)
 
@@ -666,7 +692,7 @@ func (a *androidModuleContext) InstallSymlink(installPath OutputPath, name strin
 	a.module.base().hooks.runInstallHooks(a, fullInstallPath, true)
 
 	if !a.module.base().commonProperties.SkipInstall &&
-		(a.Host() || !a.AConfig().SkipDeviceInstall()) {
+		(!a.Device() || !a.AConfig().SkipDeviceInstall()) {
 
 		a.ModuleBuild(pctx, ModuleBuildParams{
 			Rule:      Symlink,
@@ -742,9 +768,14 @@ type SourceFileProducer interface {
 }
 
 // Returns a list of paths expanded from globs and modules referenced using ":module" syntax.
-// ExpandSourceDeps must have already been called during the dependency resolution phase.
+// ExtractSourcesDeps must have already been called during the dependency resolution phase.
 func (ctx *androidModuleContext) ExpandSources(srcFiles, excludes []string) Paths {
+	return ctx.ExpandSourcesSubDir(srcFiles, excludes, "")
+}
+
+func (ctx *androidModuleContext) ExpandSourcesSubDir(srcFiles, excludes []string, subDir string) Paths {
 	prefix := PathForModuleSrc(ctx).String()
+
 	for i, e := range excludes {
 		j := findStringInSlice(e, srcFiles)
 		if j != -1 {
@@ -754,23 +785,32 @@ func (ctx *androidModuleContext) ExpandSources(srcFiles, excludes []string) Path
 		excludes[i] = filepath.Join(prefix, e)
 	}
 
-	globbedSrcFiles := make(Paths, 0, len(srcFiles))
+	expandedSrcFiles := make(Paths, 0, len(srcFiles))
 	for _, s := range srcFiles {
 		if m := SrcIsModule(s); m != "" {
 			module := ctx.GetDirectDepWithTag(m, SourceDepTag)
 			if srcProducer, ok := module.(SourceFileProducer); ok {
-				globbedSrcFiles = append(globbedSrcFiles, srcProducer.Srcs()...)
+				expandedSrcFiles = append(expandedSrcFiles, srcProducer.Srcs()...)
 			} else {
 				ctx.ModuleErrorf("srcs dependency %q is not a source file producing module", m)
 			}
 		} else if pathtools.IsGlob(s) {
-			globbedSrcFiles = append(globbedSrcFiles, ctx.Glob(filepath.Join(prefix, s), excludes)...)
+			globbedSrcFiles := ctx.Glob(filepath.Join(prefix, s), excludes)
+			expandedSrcFiles = append(expandedSrcFiles, globbedSrcFiles...)
+			for i, s := range expandedSrcFiles {
+				expandedSrcFiles[i] = s.(ModuleSrcPath).WithSubDir(ctx, subDir)
+			}
 		} else {
-			globbedSrcFiles = append(globbedSrcFiles, PathForModuleSrc(ctx, s))
+			s := PathForModuleSrc(ctx, s).WithSubDir(ctx, subDir)
+			expandedSrcFiles = append(expandedSrcFiles, s)
 		}
 	}
 
-	return globbedSrcFiles
+	return expandedSrcFiles
+}
+
+func (ctx *androidModuleContext) RequiredModuleNames() []string {
+	return ctx.module.base().commonProperties.Required
 }
 
 func (ctx *androidModuleContext) Glob(globPattern string, excludes []string) Paths {

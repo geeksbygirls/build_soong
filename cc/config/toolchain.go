@@ -16,6 +16,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"android/soong/android"
 )
@@ -47,6 +48,7 @@ type Toolchain interface {
 	GccTriple() string
 	// GccVersion should return a real value, not a ninja reference
 	GccVersion() string
+	ToolPath() string
 
 	ToolchainCflags() string
 	ToolchainLdflags() string
@@ -145,6 +147,10 @@ func (toolchainBase) Bionic() bool {
 	return true
 }
 
+func (t toolchainBase) ToolPath() string {
+	return ""
+}
+
 type toolchain64Bit struct {
 	toolchainBase
 }
@@ -201,18 +207,29 @@ func inList(s string, list []string) bool {
 	return indexList(s, list) != -1
 }
 
-func AddressSanitizerRuntimeLibrary(t Toolchain) string {
+func SanitizerRuntimeLibrary(t Toolchain, sanitizer string) string {
 	arch := t.SanitizerRuntimeLibraryArch()
 	if arch == "" {
 		return ""
 	}
-	return "libclang_rt.asan-" + arch + "-android.so"
+	return "libclang_rt." + sanitizer + "-" + arch + "-android.so"
+}
+
+func AddressSanitizerRuntimeLibrary(t Toolchain) string {
+	return SanitizerRuntimeLibrary(t, "asan")
 }
 
 func UndefinedBehaviorSanitizerRuntimeLibrary(t Toolchain) string {
-	arch := t.SanitizerRuntimeLibraryArch()
-	if arch == "" {
-		return ""
+	return SanitizerRuntimeLibrary(t, "ubsan_standalone")
+}
+
+func ThreadSanitizerRuntimeLibrary(t Toolchain) string {
+	return SanitizerRuntimeLibrary(t, "tsan")
+}
+
+func ToolPath(t Toolchain) string {
+	if p := t.ToolPath(); p != "" {
+		return p
 	}
-	return "libclang_rt.ubsan_standalone-" + arch + "-android.so"
+	return filepath.Join(t.GccRoot(), t.GccTriple(), "bin")
 }

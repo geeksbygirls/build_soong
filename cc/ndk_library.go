@@ -30,10 +30,10 @@ var (
 
 	genStubSrc = pctx.AndroidStaticRule("genStubSrc",
 		blueprint.RuleParams{
-			Command:     "$toolPath --arch $arch --api $apiLevel $in $out",
+			Command:     "$toolPath --arch $arch --api $apiLevel $vndk $in $out",
 			Description: "genStubSrc $out",
 			CommandDeps: []string{"$toolPath"},
-		}, "arch", "apiLevel")
+		}, "arch", "apiLevel", "vndk")
 
 	ndkLibrarySuffix = ".ndk"
 
@@ -130,6 +130,16 @@ func normalizeNdkApiLevel(apiLevel string, arch android.Arch) (string, error) {
 		"x86_64": 21,
 	}
 
+	archStr := arch.ArchType.String()
+	firstArchVersion, ok := firstArchVersions[archStr]
+	if !ok {
+		panic(fmt.Errorf("Arch %q not found in firstArchVersions", archStr))
+	}
+
+	if apiLevel == "minimum" {
+		return strconv.Itoa(firstArchVersion), nil
+	}
+
 	// If the NDK drops support for a platform version, we don't want to have to
 	// fix up every module that was using it as its SDK version. Clip to the
 	// supported version here instead.
@@ -138,12 +148,6 @@ func normalizeNdkApiLevel(apiLevel string, arch android.Arch) (string, error) {
 		return "", fmt.Errorf("API level must be an integer (is %q)", apiLevel)
 	}
 	version = intMax(version, minVersion)
-
-	archStr := arch.ArchType.String()
-	firstArchVersion, ok := firstArchVersions[archStr]
-	if !ok {
-		panic(fmt.Errorf("Arch %q not found in firstArchVersions", archStr))
-	}
 
 	return strconv.Itoa(intMax(version, firstArchVersion)), nil
 }
@@ -160,6 +164,14 @@ func shouldUseVersionScript(stub *stubDecorator) (bool, error) {
 	// unversioned_until is normally empty, in which case we should use the version script.
 	if stub.properties.Unversioned_until == "" {
 		return true, nil
+	}
+
+	if stub.properties.Unversioned_until == "current" {
+		if stub.properties.ApiLevel == "current" {
+			return true, nil
+		} else {
+			return false, nil
+		}
 	}
 
 	if stub.properties.ApiLevel == "current" {
@@ -229,28 +241,20 @@ func (c *stubDecorator) compilerInit(ctx BaseModuleContext) {
 	ndkMigratedLibs = append(ndkMigratedLibs, name)
 }
 
-func (c *stubDecorator) compile(ctx ModuleContext, flags Flags, deps PathDeps) Objects {
+func compileStubLibrary(ctx ModuleContext, flags Flags, symbolFile, apiLevel, vndk string) (Objects, android.ModuleGenPath) {
 	arch := ctx.Arch().ArchType.String()
 
-	if !strings.HasSuffix(ctx.ModuleName(), ndkLibrarySuffix) {
-		ctx.ModuleErrorf("ndk_library modules names must be suffixed with %q\n",
-			ndkLibrarySuffix)
-	}
-	libName := strings.TrimSuffix(ctx.ModuleName(), ndkLibrarySuffix)
-	fileBase := fmt.Sprintf("%s.%s.%s", libName, arch, c.properties.ApiLevel)
-	stubSrcName := fileBase + ".c"
-	stubSrcPath := android.PathForModuleGen(ctx, stubSrcName)
-	versionScriptName := fileBase + ".map"
-	versionScriptPath := android.PathForModuleGen(ctx, versionScriptName)
-	c.versionScriptPath = versionScriptPath
-	symbolFilePath := android.PathForModuleSrc(ctx, c.properties.Symbol_file)
+	stubSrcPath := android.PathForModuleGen(ctx, "stub.c")
+	versionScriptPath := android.PathForModuleGen(ctx, "stub.map")
+	symbolFilePath := android.PathForModuleSrc(ctx, symbolFile)
 	ctx.ModuleBuild(pctx, android.ModuleBuildParams{
 		Rule:    genStubSrc,
 		Outputs: []android.WritablePath{stubSrcPath, versionScriptPath},
 		Input:   symbolFilePath,
 		Args: map[string]string{
 			"arch":     arch,
-			"apiLevel": c.properties.ApiLevel,
+			"apiLevel": apiLevel,
+			"vndk":     vndk,
 		},
 	})
 
@@ -268,7 +272,17 @@ func (c *stubDecorator) compile(ctx ModuleContext, flags Flags, deps PathDeps) O
 
 	subdir := ""
 	srcs := []android.Path{stubSrcPath}
-	return compileObjs(ctx, flagsToBuilderFlags(flags), subdir, srcs, nil)
+	return compileObjs(ctx, flagsToBuilderFlags(flags), subdir, srcs, nil), versionScriptPath
+}
+
+func (c *stubDecorator) compile(ctx ModuleContext, flags Flags, deps PathDeps) Objects {
+	if !strings.HasSuffix(ctx.ModuleName(), ndkLibrarySuffix) {
+		ctx.ModuleErrorf("ndk_library modules names must be suffixed with %q\n",
+			ndkLibrarySuffix)
+	}
+	objs, versionScript := compileStubLibrary(ctx, flags, c.properties.Symbol_file, c.properties.ApiLevel, "")
+	c.versionScriptPath = versionScript
+	return objs
 }
 
 func (linker *stubDecorator) linkerDeps(ctx DepsContext, deps Deps) Deps {
@@ -327,7 +341,7 @@ func newStubLibrary() (*Module, []interface{}) {
 	module.linker = stub
 	module.installer = stub
 
-	return module, []interface{}{&stub.properties}
+	return module, []interface{}{&stub.properties, &library.MutatedProperties}
 }
 
 func ndkLibraryFactory() (blueprint.Module, []interface{}) {
