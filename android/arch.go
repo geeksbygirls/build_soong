@@ -217,7 +217,8 @@ type OsType struct {
 type OsClass int
 
 const (
-	Device OsClass = iota
+	Generic OsClass = iota
+	Device
 	Host
 	HostCross
 )
@@ -780,6 +781,10 @@ func decodeTargetProductVariables(config *config) (map[OsClass][]Target, error) 
 		addTarget(BuildOs, *variables.HostSecondaryArch, nil, nil, nil)
 	}
 
+	if config.Host_bionic != nil && *config.Host_bionic {
+		addTarget(LinuxBionic, "x86_64", nil, nil, nil)
+	}
+
 	if variables.CrossHost != nil && *variables.CrossHost != "" {
 		crossHostOs := osByName(*variables.CrossHost)
 		if crossHostOs == NoOsType {
@@ -851,8 +856,10 @@ func getMegaDeviceConfig() []archConfig {
 		{"arm", "armv7-a-neon", "cortex-a53.a57", []string{"armeabi-v7a"}},
 		{"arm", "armv7-a-neon", "denver", []string{"armeabi-v7a"}},
 		{"arm", "armv7-a-neon", "krait", []string{"armeabi-v7a"}},
+		{"arm", "armv7-a-neon", "kryo", []string{"armeabi-v7a"}},
 		{"arm64", "armv8-a", "cortex-a53", []string{"arm64-v8a"}},
 		{"arm64", "armv8-a", "denver64", []string{"arm64-v8a"}},
+		{"arm64", "armv8-a", "kryo", []string{"arm64-v8a"}},
 		{"mips", "mips32-fp", "", []string{"mips"}},
 		{"mips", "mips32r2-fp", "", []string{"mips"}},
 		{"mips", "mips32r2-fp-xburst", "", []string{"mips"}},

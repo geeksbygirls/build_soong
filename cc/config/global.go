@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 
 	"android/soong/android"
@@ -69,9 +70,11 @@ var (
 		"-w",
 	}
 
-	CStdVersion      = "gnu99"
-	CppStdVersion    = "gnu++14"
-	GccCppStdVersion = "gnu++11"
+	CStdVersion               = "gnu99"
+	CppStdVersion             = "gnu++14"
+	GccCppStdVersion          = "gnu++11"
+	ExperimentalCStdVersion   = "gnu11"
+	ExperimentalCppStdVersion = "gnu++1z"
 )
 
 var pctx = android.NewPackageContext("android/soong/cc/config")
@@ -134,7 +137,7 @@ func init() {
 		if override := config.(android.Config).Getenv("LLVM_PREBUILTS_VERSION"); override != "" {
 			return override, nil
 		}
-		return "clang-3289846", nil
+		return "clang-3859424", nil
 	})
 	pctx.StaticVariable("ClangPath", "${ClangBase}/${HostPrebuiltTag}/${ClangVersion}")
 	pctx.StaticVariable("ClangBin", "${ClangPath}/bin")
@@ -143,9 +146,17 @@ func init() {
 		if override := config.(android.Config).Getenv("LLVM_RELEASE_VERSION"); override != "" {
 			return override, nil
 		}
-		return "3.8", nil
+		return "4.0", nil
 	})
 	pctx.StaticVariable("ClangAsanLibDir", "${ClangPath}/lib64/clang/${ClangShortVersion}/lib/linux")
+
+	// These are tied to the version of LLVM directly in external/llvm, so they might trail the host prebuilts
+	// being used for the rest of the build process.
+	pctx.SourcePathVariable("RSClangBase", "prebuilts/clang/host")
+	pctx.SourcePathVariable("RSClangVersion", "clang-3289846")
+	pctx.SourcePathVariable("RSReleaseVersion", "3.8")
+	pctx.StaticVariable("RSLLVMPrebuiltsPath", "${RSClangBase}/${HostPrebuiltTag}/${RSClangVersion}/bin")
+	pctx.StaticVariable("RSIncludePath", "${RSLLVMPrebuiltsPath}/../lib64/clang/${RSReleaseVersion}/include")
 
 	pctx.VariableFunc("CcWrapper", func(config interface{}) (string, error) {
 		if override := config.(android.Config).Getenv("CC_WRAPPER"); override != "" {
@@ -169,4 +180,18 @@ func bionicHeaders(bionicArch, kernelArch string) string {
 
 func VndkLibraries() []string {
 	return []string{}
+}
+
+// This needs to be kept up to date with the list in system/core/rootdir/etc/ld.config.txt:
+// [vendor]
+// namespace.default.link.system.shared_libs
+func LLndkLibraries() []string {
+	return []string{"libc", "libm", "libdl", "liblog", "ld-android"}
+}
+
+func replaceFirst(slice []string, from, to string) {
+	if slice[0] != from {
+		panic(fmt.Errorf("Expected %q, found %q", from, to))
+	}
+	slice[0] = to
 }

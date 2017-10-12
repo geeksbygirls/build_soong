@@ -43,7 +43,7 @@ type AndroidMkData struct {
 	OutputFile OptionalPath
 	Disabled   bool
 
-	Custom func(w io.Writer, name, prefix string) error
+	Custom func(w io.Writer, name, prefix, moduleDir string) error
 
 	Extra []func(w io.Writer, outputFile Path) error
 }
@@ -164,28 +164,35 @@ func translateAndroidMkModule(ctx blueprint.SingletonContext, w io.Writer, mod b
 		return err
 	}
 
+	// Make does not understand LinuxBionic
+	if amod.Os() == LinuxBionic {
+		return nil
+	}
+
 	if data.SubName != "" {
 		name += data.SubName
 	}
 
 	if data.Custom != nil {
 		prefix := ""
-		switch amod.Os().Class {
-		case Host:
-			prefix = "HOST_"
-		case HostCross:
-			prefix = "HOST_CROSS_"
-		case Device:
-			prefix = "TARGET_"
+		if amod.ArchSpecific() {
+			switch amod.Os().Class {
+			case Host:
+				prefix = "HOST_"
+			case HostCross:
+				prefix = "HOST_CROSS_"
+			case Device:
+				prefix = "TARGET_"
 
+			}
+
+			config := ctx.Config().(Config)
+			if amod.Arch().ArchType != config.Targets[amod.Os().Class][0].Arch.ArchType {
+				prefix = "2ND_" + prefix
+			}
 		}
 
-		config := ctx.Config().(Config)
-		if amod.Arch().ArchType != config.Targets[amod.Os().Class][0].Arch.ArchType {
-			prefix = "2ND_" + prefix
-		}
-
-		return data.Custom(w, name, prefix)
+		return data.Custom(w, name, prefix, filepath.Dir(ctx.BlueprintFile(mod)))
 	}
 
 	if data.Disabled {
@@ -226,6 +233,12 @@ func translateAndroidMkModule(ctx blueprint.SingletonContext, w io.Writer, mod b
 		}
 		if amod.commonProperties.Proprietary {
 			fmt.Fprintln(w, "LOCAL_PROPRIETARY_MODULE := true")
+		}
+		if amod.commonProperties.Vendor {
+			fmt.Fprintln(w, "LOCAL_VENDOR_MODULE := true")
+		}
+		if amod.commonProperties.Owner != "" {
+			fmt.Fprintln(w, "LOCAL_MODULE_OWNER :=", amod.commonProperties.Owner)
 		}
 	}
 

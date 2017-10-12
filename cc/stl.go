@@ -50,13 +50,17 @@ func (stl *stl) begin(ctx BaseModuleContext) {
 				"stlport_shared", "stlport_static",
 				"gnustl_static":
 				return "ndk_lib" + s
+			case "libc++":
+				return "ndk_libc++_shared"
+			case "libc++_static":
+				return "ndk_libc++_static"
 			case "none":
 				return ""
 			default:
 				ctx.ModuleErrorf("stl: %q is not a supported STL with sdk_version set", s)
 				return ""
 			}
-		} else if ctx.Os() == android.Windows {
+		} else if ctx.Windows() {
 			switch s {
 			case "libc++", "libc++_static", "libstdc++", "":
 				// libc++ is not supported on mingw
